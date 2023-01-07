@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"github.com/jackc/pgproto3/v2"
 
@@ -17,9 +18,9 @@ import (
 var readResp = flag.Bool("v", false, "Logs every packet in great detail")
 var doErr = flag.Bool("e", false, "Logs every packet in great detail")
 
-func getC() (net.Conn, error) {
+func getC(port int) (net.Conn, error) {
 	const proto = "tcp"
-	const addr = "[::1]:5432"
+	addr := "[::1]:" + strconv.Itoa(port)
 	return net.Dial(proto, addr)
 }
 
@@ -67,8 +68,8 @@ func (c *ConnState) waitRFQ() error {
 }
 
 
-func (c *ConnState) allocnewconn() {
-	conn, err := getC()
+func (c *ConnState) allocnewconn(port int) {
+	conn, err := getC(port)
 	if err != nil {
 		tracelog.ErrorLogger.Printf("failed to get conn %w", err)
 		if err != okerr {
@@ -83,7 +84,7 @@ func (c *ConnState) allocnewconn() {
 		ProtocolVersion: 196608,
 		Parameters: map[string]string{
 			"user":     "reshke",
-			"database": "postgres",
+			"database": "yoba",
 		},
 	}); err != nil {
 		tracelog.ErrorLogger.Printf("startup failed %w", err)
@@ -126,12 +127,12 @@ func (src *CancelRequest) Encode(dst []byte) []byte {
 
 
 func gaogao(waitforres bool) error {
-
 	state := map[string] *ConnState{}
-    reader := bufio.NewReader(os.Stdin)
+	recordings := map[string][]string{}
+	reader := bufio.NewReader(os.Stdin)
 
 	for {
-		fmt.Printf("hello, yoba@> ")    
+		fmt.Printf("hello, yoba@> ")
 
 		text, err := reader.ReadString('\n')
 		if err != nil {
@@ -146,19 +147,118 @@ func gaogao(waitforres bool) error {
 		}
 
 		switch text {
+		case "multiexecute":
+			fmt.Printf("enter recording name: ")
+			currcname, err := reader.ReadString('\n')
+			if err != nil {
+				return nil;
+			}
+
+			currcname = strings.TrimSpace(currcname)
+
+			qconn, ok := state[currcname]
+			if !ok {
+				fmt.Printf("no such conn: %s\n", currcname)
+				continue
+			}
+			fmt.Printf("enter rep times: ")
+
+			cname, err := reader.ReadString('\n')
+			if err != nil {
+				return err
+			}
+			times, err := strconv.Atoi(cname)
+			if err != nil {
+				panic(err)
+				return err
+			}
+
+			fmt.Printf("enter rep port: ")
+			portStr, err := reader.ReadString('\n')
+			if err != nil {
+				return err
+			}
+			port, err := strconv.Atoi(portStr)
+			if err != nil {
+				panic(err)
+				return err
+			}
+
+			// dont care of result
+
+			for i := 0; i < times; i++ {
+				go func () {
+					qconn = &ConnState{}
+
+					qconn.allocnewconn(port)
+					for _, text := range  recordings[currcname] {
+						if err := qconn.fr.Send(&pgproto3.Query{
+							String: text,
+						}); err != nil {
+							panic(err)
+						}
+						if err := qconn.waitRFQ(); err != nil {
+							tracelog.ErrorLogger.Printf("executing failed %w", err)
+							if err != okerr {
+								panic(err)
+							}
+							return
+						}
+					}
+				} ()
+			}
+
+		case "record":
+			fmt.Printf("enter recording name: ")
+			currrname, err := reader.ReadString('\n')
+			if err != nil {
+				return err
+			}
+			currrname = strings.TrimSpace(currrname)
+			lines := make([]string, 0)
+
+			for {
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					return err
+				}
+				line = strings.TrimSpace(line)
+
+				if line == "recend" {
+					break
+				}
+				lines = append(lines, line)
+			}
+
+			recordings[currrname] = lines
+
 		case "connect":
 			fmt.Printf("enter connection name: ")
 			cname, err := reader.ReadString('\n')
 			if err != nil {
-				return nil;
+				return err
+			}
+			fmt.Printf("enter connection port: ")
+
+			portStr, err := reader.ReadString('\n')
+			if err != nil {
+				panic(err)
+				return err
+			}
+
+			portStr = strings.TrimSpace(portStr)
+
+			port, err := strconv.Atoi(portStr)
+			if err != nil {
+				panic(err)
+				return err
 			}
 
 			cname = strings.TrimSpace(cname)
 
 			state[cname] = &ConnState{}
 
-			state[cname].allocnewconn()
-
+			state[cname].allocnewconn(port)
 		case "query":
 			fmt.Printf("enter target connection: ")
 			currcname, err := reader.ReadString('\n')
@@ -173,7 +273,7 @@ func gaogao(waitforres bool) error {
 				fmt.Printf("no such conn: %s\n", currcname)
 				continue
 			}
-			fmt.Printf("enter yout query@> ")    
+			fmt.Printf("enter yout query@> ")
 
 			text, err := reader.ReadString('\n')
 			if err != nil {
@@ -186,7 +286,7 @@ func gaogao(waitforres bool) error {
 			}); err != nil {
 				panic(err)
 			}
-	
+
 			if err := qconn.waitRFQ(); err != nil {
 				tracelog.ErrorLogger.Printf("exeting failed %w", err)
 				if err != okerr {
@@ -210,7 +310,7 @@ func gaogao(waitforres bool) error {
 				fmt.Printf("no such conn: %s\n", currcname)
 				continue
 			}
-			fmt.Printf("enter yout query@> ")    
+			fmt.Printf("enter yout query@> ")
 
 			text, err := reader.ReadString('\n')
 			if err != nil {
@@ -244,7 +344,7 @@ func gaogao(waitforres bool) error {
 				cr.regs = append(cr.regs, CancelRequestMeta{c.ProcessID, c.SecretKey})
 			}
 
-			conn, err := getC()
+			conn, err := getC(5432)
 			if err != nil {
 				tracelog.ErrorLogger.Printf("failed to get conn %w", err)
 				if err != okerr {
@@ -261,7 +361,6 @@ func gaogao(waitforres bool) error {
 			} else {
 				fmt.Printf("send %d\n", n)
 			}
-		
 		default:
 			fmt.Printf("fail!\n")
 		}
