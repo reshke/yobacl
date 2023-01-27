@@ -1,14 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"flag"
-	"os"
-	"bufio"
 	"fmt"
 	"net"
+	"os"
 	"strconv"
 	"strings"
+
 	"github.com/jackc/pgproto3/v2"
 
 	"github.com/jackc/pgio"
@@ -38,10 +39,9 @@ func readCnt(fr *pgproto3.Frontend, count int) error {
 
 var okerr = errors.New("something")
 
-
 type ConnState struct {
-	fr *pgproto3.Frontend
-	conn net.Conn
+	fr        *pgproto3.Frontend
+	conn      net.Conn
 	ProcessID uint32
 	SecretKey uint32
 }
@@ -66,7 +66,6 @@ func (c *ConnState) waitRFQ() error {
 		}
 	}
 }
-
 
 func (c *ConnState) allocnewconn(port int) {
 	conn, err := getC(port)
@@ -96,12 +95,46 @@ func (c *ConnState) allocnewconn(port int) {
 	if err := c.waitRFQ(); err != nil {
 		tracelog.ErrorLogger.Printf("startup failed %w", err)
 		if err != okerr {
-			panic(err)
+			tracelog.ErrorLogger.PrintError(err)
 		}
 		return
 	}
 }
 
+func (c *ConnState) allocnewlogicalconn(port int) {
+	conn, err := getC(port)
+	if err != nil {
+		tracelog.ErrorLogger.Printf("failed to get conn %w", err)
+		if err != okerr {
+			panic(err)
+		}
+		return
+	}
+	c.conn = conn
+	c.fr = pgproto3.NewFrontend(pgproto3.NewChunkReader(conn), conn)
+
+	if err := c.fr.Send(&pgproto3.StartupMessage{
+		ProtocolVersion: 196608,
+		Parameters: map[string]string{
+			"user":        "reshke",
+			"replication": "database",
+			"database":    "postgres",
+		},
+	}); err != nil {
+		tracelog.ErrorLogger.Printf("startup failed %w", err)
+		if err != okerr {
+			panic(err)
+		}
+	}
+
+	if err := c.waitRFQ(); err != nil {
+		tracelog.ErrorLogger.Printf("startup failed %w", err)
+		if err != okerr {
+			panic(err)
+		}
+		return
+	}
+}
 
 const cancelRequestCode = 80877102
 
@@ -116,7 +149,7 @@ type CancelRequest struct {
 
 // Encode encodes src into dst. dst will include the 4 byte message length.
 func (src *CancelRequest) Encode(dst []byte) []byte {
-	dst = pgio.AppendInt32(dst, int32(8 + len(src.regs) * 8))
+	dst = pgio.AppendInt32(dst, int32(8+len(src.regs)*8))
 	dst = pgio.AppendInt32(dst, cancelRequestCode)
 	for i := 0; i < len(src.regs); i++ {
 		dst = pgio.AppendUint32(dst, src.regs[i].ProcessID)
@@ -125,9 +158,8 @@ func (src *CancelRequest) Encode(dst []byte) []byte {
 	return dst
 }
 
-
 func gaogao(waitforres bool) error {
-	state := map[string] *ConnState{}
+	state := map[string]*ConnState{}
 	recordings := map[string][]string{}
 	reader := bufio.NewReader(os.Stdin)
 
@@ -136,7 +168,7 @@ func gaogao(waitforres bool) error {
 
 		text, err := reader.ReadString('\n')
 		if err != nil {
-			return nil;
+			return nil
 		}
 
 		text = strings.TrimSpace(text)
@@ -147,11 +179,61 @@ func gaogao(waitforres bool) error {
 		}
 
 		switch text {
+		case "logicalprompt":
+			fmt.Printf("enter connection port: ")
+
+			portStr, err := reader.ReadString('\n')
+			if err != nil {
+				panic(err)
+			}
+
+			portStr = strings.TrimSpace(portStr)
+
+			port, err := strconv.Atoi(portStr)
+			if err != nil {
+				panic(err)
+			}
+
+			cname := "current-local-rep"
+
+			state[cname] = &ConnState{}
+
+			state[cname].allocnewlogicalconn(port)
+
+			qconn, ok := state[cname]
+			if !ok {
+				fmt.Printf("no such conn: %s\n", cname)
+				continue
+			}
+
+			for {
+				fmt.Printf("enter yout query@> ")
+
+				text, err := reader.ReadString('\n')
+				if err != nil {
+					panic(err)
+				}
+				text = strings.TrimSpace(text)
+				fmt.Printf("executing your query %s\n", text)
+				if err := qconn.fr.Send(&pgproto3.Query{
+					String: text,
+				}); err != nil {
+					panic(err)
+				}
+
+				if err := qconn.waitRFQ(); err != nil {
+					tracelog.ErrorLogger.Printf("exeting failed %w", err)
+					if err != okerr {
+						panic(err)
+					}
+					return err
+				}
+			}
 		case "multiexecute":
 			fmt.Printf("enter recording name: ")
 			currcname, err := reader.ReadString('\n')
 			if err != nil {
-				return nil;
+				return nil
 			}
 
 			currcname = strings.TrimSpace(currcname)
@@ -187,11 +269,11 @@ func gaogao(waitforres bool) error {
 			// dont care of result
 
 			for i := 0; i < times; i++ {
-				go func () {
+				go func() {
 					qconn = &ConnState{}
 
 					qconn.allocnewconn(port)
-					for _, text := range  recordings[currcname] {
+					for _, text := range recordings[currcname] {
 						if err := qconn.fr.Send(&pgproto3.Query{
 							String: text,
 						}); err != nil {
@@ -205,7 +287,7 @@ func gaogao(waitforres bool) error {
 							return
 						}
 					}
-				} ()
+				}()
 			}
 
 		case "record":
@@ -263,7 +345,7 @@ func gaogao(waitforres bool) error {
 			fmt.Printf("enter target connection: ")
 			currcname, err := reader.ReadString('\n')
 			if err != nil {
-				return nil;
+				return nil
 			}
 
 			currcname = strings.TrimSpace(currcname)
@@ -300,7 +382,7 @@ func gaogao(waitforres bool) error {
 			fmt.Printf("enter target connection: ")
 			currcname, err := reader.ReadString('\n')
 			if err != nil {
-				return nil;
+				return nil
 			}
 
 			currcname = strings.TrimSpace(currcname)
@@ -325,7 +407,7 @@ func gaogao(waitforres bool) error {
 			}
 			// dont care of result
 
-			go func () {
+			go func() {
 				if err := qconn.waitRFQ(); err != nil {
 					tracelog.ErrorLogger.Printf("executing failed %w", err)
 					if err != okerr {
@@ -333,14 +415,14 @@ func gaogao(waitforres bool) error {
 					}
 					return
 				}
-			} ()
+			}()
 
 		case "shutdown all":
 			cr := CancelRequest{
 				regs: []CancelRequestMeta{},
 			}
 			for _, c := range state {
-				fmt.Printf("%d %d \n", c.ProcessID, c.SecretKey);
+				fmt.Printf("%d %d \n", c.ProcessID, c.SecretKey)
 				cr.regs = append(cr.regs, CancelRequestMeta{c.ProcessID, c.SecretKey})
 			}
 
@@ -365,9 +447,6 @@ func gaogao(waitforres bool) error {
 			fmt.Printf("fail!\n")
 		}
 	}
-
-	tracelog.InfoLogger.Printf("ok")
-	return nil
 }
 
 func main() {
